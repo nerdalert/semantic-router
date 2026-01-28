@@ -136,14 +136,15 @@ Test the deployment:
 # Test models endpoint
 curl -k "https://$ROUTER_URL/v1/models"
 
-# Test chat completion
-curl -k "https://$ROUTER_URL/v1/chat/completions" \
+# Domain-specific auto-routing (law -> Model-B)
+curl -k -X POST "https://$ROUTER_URL/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "<your-model>",
-    "messages": [{"role": "user", "content": "What is 2+2?"}],
-    "max_tokens": 50
-  }'
+  -d '{"model":"auto","messages":[{"role":"user","content":"Explain the elements of a contract under common law and give a simple example."}]}'
+
+# Domain-specific auto-routing (math -> Model-A)
+curl -k -X POST "https://$ROUTER_URL/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"What is 2+2?"}]}'
 ```
 
 Run validation tests:

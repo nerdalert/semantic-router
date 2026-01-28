@@ -87,52 +87,35 @@ log "Creating namespace: $NAMESPACE"
 oc create namespace "$NAMESPACE" --dry-run=client -o yaml | oc apply -f -
 success "Namespace ready"
 
-# KServe mode: deploy simulator InferenceService and semantic-router using KServe backend
+# KServe mode: deploy simulator and semantic-router using KServe backend
 if [[ "$USE_KSERVE" == "true" ]]; then
     KSERVE_SCRIPT="$SCRIPT_DIR/../kserve/deploy.sh"
     KSERVE_INSTALL_SCRIPT="$SCRIPT_DIR/../kserve/install-kserve.sh"
-    KSERVE_ISVC_MANIFEST_A="$SCRIPT_DIR/../kserve/inference-examples/inferenceservice-llm-d-sim-model-a.yaml"
-    KSERVE_ISVC_MANIFEST_B="$SCRIPT_DIR/../kserve/inference-examples/inferenceservice-llm-d-sim-model-b.yaml"
+    # Use standalone deployments for simulator - LLMInferenceService has issues with simulator (storage-initializer)
+    SIMULATOR_DEPLOYMENTS="$SCRIPT_DIR/../kserve/inference-examples/simulator-deployments.yaml"
 
     if [[ ! -x "$KSERVE_SCRIPT" ]]; then
         error "KServe deploy script not found: $KSERVE_SCRIPT"
         exit 1
     fi
 
-    if ! oc get crd inferenceservices.serving.kserve.io &>/dev/null; then
-        if [[ -x "$KSERVE_INSTALL_SCRIPT" ]]; then
-            log "KServe CRD missing; installing KServe dependencies..."
-            "$KSERVE_INSTALL_SCRIPT"
-        else
-            error "KServe CRD missing and installer not found: $KSERVE_INSTALL_SCRIPT"
-            exit 1
-        fi
-    fi
-
-    if [[ ! -f "$KSERVE_ISVC_MANIFEST_A" || ! -f "$KSERVE_ISVC_MANIFEST_B" ]]; then
-        error "KServe simulator InferenceService manifests not found in $SCRIPT_DIR/../kserve/inference-examples"
+    if [[ ! -f "$SIMULATOR_DEPLOYMENTS" ]]; then
+        error "Simulator deployments manifest not found: $SIMULATOR_DEPLOYMENTS"
         exit 1
     fi
 
-    if ! oc get inferenceservice model-a -n "$NAMESPACE" &>/dev/null; then
-        log "Creating KServe simulator InferenceService: model-a"
-        oc apply -n "$NAMESPACE" -f "$KSERVE_ISVC_MANIFEST_A"
-    else
-        log "KServe InferenceService already exists: model-a"
-    fi
+    # Deploy simulator pods as standalone Deployments (not LLMInferenceService)
+    # LLMInferenceService adds a storage-initializer that tries to download models,
+    # which doesn't work for simulators that don't need actual model files.
+    log "Deploying simulator pods..."
+    oc apply -n "$NAMESPACE" -f "$SIMULATOR_DEPLOYMENTS"
 
-    if ! oc get inferenceservice model-b -n "$NAMESPACE" &>/dev/null; then
-        log "Creating KServe simulator InferenceService: model-b"
-        oc apply -n "$NAMESPACE" -f "$KSERVE_ISVC_MANIFEST_B"
-    else
-        log "KServe InferenceService already exists: model-b"
-    fi
+    log "Waiting for simulator deployments to be ready..."
+    oc wait --for=condition=Available deployment/model-a-kserve -n "$NAMESPACE" --timeout=5m
+    oc wait --for=condition=Available deployment/model-b-kserve -n "$NAMESPACE" --timeout=5m
 
-    log "Waiting for KServe simulator InferenceServices to be ready..."
-    oc wait --for=condition=Ready "inferenceservice/model-a" -n "$NAMESPACE" --timeout=10m
-    oc wait --for=condition=Ready "inferenceservice/model-b" -n "$NAMESPACE" --timeout=10m
-
-    KSERVE_ARGS=(--simulator -n "$NAMESPACE")
+    # Skip validation since we're using standalone deployments, not LLMInferenceService
+    KSERVE_ARGS=(--simulator -n "$NAMESPACE" --skip-validation)
 
     log "KServe mode: Deploying semantic-router with KServe backend..."
     "$KSERVE_SCRIPT" "${KSERVE_ARGS[@]}"

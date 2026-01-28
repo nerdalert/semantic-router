@@ -1,0 +1,161 @@
+# Standalone simulator deployments for testing semantic-router with KServe backend
+# These deployments use the llm-d-inference-sim image without LLMInferenceService
+# Use this when LLMInferenceService storage-initializer is not compatible with simulators
+---
+# Deployment: Model-A simulator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-a-kserve
+  labels:
+    app: model-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-a
+  template:
+    metadata:
+      labels:
+        app: model-a
+    spec:
+      containers:
+      - name: main
+        image: ghcr.io/llm-d/llm-d-inference-sim:v0.6.1
+        imagePullPolicy: Always
+        command: ["/app/llm-d-inference-sim"]
+        args:
+          - --port
+          - "8000"
+          - --model
+          - Model-A
+          - --mode
+          - random
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+---
+# Service: Model-A
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-a-predictor-stable
+  labels:
+    app: model-a
+    component: predictor-stable
+spec:
+  selector:
+    app: model-a
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+---
+# Deployment: Model-B simulator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-b-kserve
+  labels:
+    app: model-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-b
+  template:
+    metadata:
+      labels:
+        app: model-b
+    spec:
+      containers:
+      - name: main
+        image: ghcr.io/llm-d/llm-d-inference-sim:v0.6.1
+        imagePullPolicy: Always
+        command: ["/app/llm-d-inference-sim"]
+        args:
+          - --port
+          - "8000"
+          - --model
+          - Model-B
+          - --mode
+          - random
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+---
+# Service: Model-B
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-b-predictor-stable
+  labels:
+    app: model-b
+    component: predictor-stable
+spec:
+  selector:
+    app: model-b
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
