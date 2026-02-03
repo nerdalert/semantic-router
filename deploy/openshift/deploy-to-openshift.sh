@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_OBSERVABILITY=true
 USE_SIMULATOR=false
 USE_KSERVE=false
+NO_PUBLIC_ROUTE=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -31,17 +32,27 @@ while [[ $# -gt 0 ]]; do
             USE_KSERVE=true
             shift
             ;;
+        --no-public-route)
+            NO_PUBLIC_ROUTE=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  --simulator           Use mock-vllm simulator instead of llm-katan (no GPU required)"
             echo "  --kserve              Deploy semantic-router with a KServe backend (use --simulator for KServe sim)"
+            echo "  --no-public-route     Skip creating public routes; use when behind a gateway"
             echo "  --no-observability    Skip deploying dashboard, OpenWebUI, Grafana, and Prometheus"
             echo "  --help, -h            Show this help message"
             echo ""
             echo "By default, deploys the full stack with llm-katan (requires GPU)."
             echo "Use --simulator for CPU-only clusters without GPUs."
+            echo ""
+            echo "Two-Gateway Deployment (MaaS + vSR):"
+            echo "  1. Deploy MaaS: models-as-a-service/scripts/deploy-rhoai-stable.sh"
+            echo "  2. Deploy vSR:  $0 --kserve --simulator --no-public-route"
+            echo "  3. Integrate:   deploy/openshift/maas-integration/apply-maas-integration.sh"
             exit 0
             ;;
         *)
@@ -111,21 +122,7 @@ if [[ "$USE_KSERVE" == "true" ]]; then
     log "Installing KServe and LLMInferenceService CRDs..."
     "$KSERVE_INSTALL_SCRIPT"
 
-    # Ensure LLMInferenceServiceConfig templates exist before creating LLMInferenceServices
-    if oc get crd llminferenceserviceconfigs.serving.kserve.io &>/dev/null; then
-        if ! oc get llminferenceserviceconfig kserve-config-llm-template -n kserve &>/dev/null; then
-            log "Applying LLMInferenceServiceConfig templates..."
-            if [[ -d /home/ubuntu/tmp/kserve/config/llmisvcconfig ]]; then
-                for f in /home/ubuntu/tmp/kserve/config/llmisvcconfig/config-llm-*.yaml; do
-                    oc apply -n kserve -f "$f" 2>/dev/null || true
-                done
-            else
-                warn "Local kserve repo not found at /home/ubuntu/tmp/kserve; LLMInferenceServiceConfig templates may be missing."
-            fi
-        fi
-    fi
-
-    # Wait briefly for llmisvc controller and webhook to settle before creating LLMInferenceServices
+    # Wait for llmisvc controller and webhook to be ready before creating LLMInferenceServices
     oc wait --for=condition=Available deployment/llmisvc-controller-manager -n kserve --timeout=3m 2>/dev/null || true
     for i in {1..30}; do
         ENDPOINTS=$(oc get endpoints llmisvc-webhook-server-service -n kserve -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || echo "")
@@ -160,6 +157,9 @@ if [[ "$USE_KSERVE" == "true" ]]; then
         oc wait --for=condition=Ready llminferenceservice/model-b -n "$NAMESPACE" --timeout=10m
 
         KSERVE_ARGS=(--simulator -n "$NAMESPACE")
+        if [[ "$NO_PUBLIC_ROUTE" == "true" ]]; then
+            KSERVE_ARGS+=(--no-public-route)
+        fi
     else
         # GPU mode: deploy real Qwen model on GPU
         QWEN_LLMISVC="$SCRIPT_DIR/../kserve/inference-examples/inferenceservice-qwen-0.6b-gpu.yaml"
@@ -195,6 +195,9 @@ if [[ "$USE_KSERVE" == "true" ]]; then
         oc wait --for=condition=Ready llminferenceservice/qwen-0-6b -n "$NAMESPACE" --timeout=15m
 
         KSERVE_ARGS=(-n "$NAMESPACE" --inferenceservice qwen-0-6b --model "Qwen/Qwen3-0.6B")
+        if [[ "$NO_PUBLIC_ROUTE" == "true" ]]; then
+            KSERVE_ARGS+=(--no-public-route)
+        fi
     fi
 
     log "KServe mode: Deploying semantic-router with KServe backend..."

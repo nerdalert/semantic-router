@@ -13,7 +13,7 @@ data:
       use_cpu: true
 
     semantic_cache:
-      enabled: true
+      enabled: false  # Disabled - requires HF_TOKEN for mom-embedding-light model
       backend_type: "memory"
       similarity_threshold: 0.8
       max_entries: 1000
@@ -38,6 +38,11 @@ data:
       threshold: 0.7
       use_cpu: true
       jailbreak_mapping_path: "models/mom-jailbreak-classifier/jailbreak_type_mapping.json"
+
+    maas_routing:
+      enabled: {{MAAS_ROUTING_ENABLED}}
+      gateway_endpoint: "{{MAAS_GATEWAY_ENDPOINT}}"
+      model_path_template: "{{MAAS_MODEL_PATH_TEMPLATE}}"
 
     # vLLM Endpoints Configuration - Using KServe LLMInferenceService (HTTP)
     # IMPORTANT: Using stable ClusterIP service (not pod IP or headless service)

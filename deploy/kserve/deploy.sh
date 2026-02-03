@@ -36,6 +36,10 @@ CACHE_PVC_SIZE="5Gi"
 EMBEDDING_MODEL="all-MiniLM-L12-v2"
 DRY_RUN=false
 SKIP_VALIDATION=false
+NO_PUBLIC_ROUTE=false
+MAAS_ROUTING_ENABLED=false
+MAAS_GATEWAY_ENDPOINT=""
+MAAS_MODEL_PATH_TEMPLATE="/%s/v1/chat/completions"
 
 # Usage function
 usage() {
@@ -61,6 +65,8 @@ Optional:
   --models-pvc-size SIZE             Size for models PVC (default: 10Gi)
   --cache-pvc-size SIZE              Size for cache PVC (default: 5Gi)
   --embedding-model MODEL            BERT embedding model (default: all-MiniLM-L12-v2)
+  --no-public-route                  Skip creating public routes; use when behind a gateway
+  --maas-gateway-endpoint HOST:PORT  MaaS gateway endpoint (enables MaaS routing if set)
   --dry-run                          Generate manifests without applying
   --skip-validation                  Skip pre-deployment validation
   -h, --help                         Show this help message
@@ -102,6 +108,9 @@ substitute_vars() {
         -e "s|{{MODEL_NAME_A}}|$MODEL_NAME_A|g" \
         -e "s|{{MODEL_NAME_B}}|$MODEL_NAME_B|g" \
         -e "s|{{EMBEDDING_MODEL}}|$EMBEDDING_MODEL|g" \
+        -e "s|{{MAAS_ROUTING_ENABLED}}|$MAAS_ROUTING_ENABLED|g" \
+        -e "s|{{MAAS_GATEWAY_ENDPOINT}}|$MAAS_GATEWAY_ENDPOINT|g" \
+        -e "s|{{MAAS_MODEL_PATH_TEMPLATE}}|$MAAS_MODEL_PATH_TEMPLATE|g" \
         -e "s|{{PREDICTOR_SERVICE_IP}}|${PREDICTOR_SERVICE_IP:-10.0.0.1}|g" \
         -e "s|{{PREDICTOR_SERVICE_IP_A}}|${PREDICTOR_SERVICE_IP_A:-10.0.0.1}|g" \
         -e "s|{{PREDICTOR_SERVICE_IP_B}}|${PREDICTOR_SERVICE_IP_B:-10.0.0.1}|g" \
@@ -175,6 +184,15 @@ while [[ $# -gt 0 ]]; do
             SKIP_VALIDATION=true
             shift
             ;;
+        --no-public-route)
+            NO_PUBLIC_ROUTE=true
+            shift
+            ;;
+        --maas-gateway-endpoint)
+            MAAS_GATEWAY_ENDPOINT="$2"
+            MAAS_ROUTING_ENABLED=true
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -226,6 +244,8 @@ echo "  Embedding Model:        $EMBEDDING_MODEL"
 echo "  Storage Class:          ${STORAGE_CLASS:-<cluster default>}"
 echo "  Models PVC Size:        $MODELS_PVC_SIZE"
 echo "  Cache PVC Size:         $CACHE_PVC_SIZE"
+echo "  MaaS Routing Enabled:   $MAAS_ROUTING_ENABLED"
+echo "  MaaS Gateway Endpoint:  ${MAAS_GATEWAY_ENDPOINT:-<auto>}"
 echo "  Dry Run:                $DRY_RUN"
 echo ""
 
@@ -261,6 +281,18 @@ if [ "$SKIP_VALIDATION" = false ]; then
         fi
     else
         echo -e "${GREEN}✓${NC} Namespace exists: $NAMESPACE"
+    fi
+
+    if [ "$MAAS_ROUTING_ENABLED" = true ] && [ -z "$MAAS_GATEWAY_ENDPOINT" ]; then
+        CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "")
+        if [ -n "$CLUSTER_DOMAIN" ]; then
+            MAAS_GATEWAY_ENDPOINT="maas.${CLUSTER_DOMAIN}:80"
+        fi
+        if [ -z "$MAAS_GATEWAY_ENDPOINT" ]; then
+            echo -e "${RED}✗ Error: MaaS routing enabled but gateway endpoint could not be determined.${NC}"
+            echo "  Provide --maas-gateway-endpoint HOST:PORT"
+            exit 1
+        fi
     fi
 
     validate_inferenceservice() {
@@ -329,6 +361,15 @@ if [ "$SKIP_VALIDATION" = false ]; then
         local output
         local selector_label
         local selector_value
+
+        # First check if LLMInferenceService controller already created a workload service
+        local existing_ip
+        existing_ip=$(oc get svc "${name}-kserve-workload-svc" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+        if [ -n "$existing_ip" ]; then
+            echo "Using existing workload service: ${name}-kserve-workload-svc" >&2
+            echo "$existing_ip"
+            return
+        fi
 
         echo "Creating stable ClusterIP service for predictor: $name" >&2
         selector_label=$(detect_predictor_selector_label "$name")
@@ -403,13 +444,20 @@ else
     get_existing_service_ip() {
         local name="$1"
         local ip
-        ip=$(oc get svc "${name}-predictor-stable" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
-        if [ -z "$ip" ]; then
-            echo -e "${YELLOW}⚠ Warning: Could not get ClusterIP for ${name}-predictor-stable${NC}" >&2
-            echo "10.0.0.1"  # fallback
-        else
+        # Try LLMInferenceService workload service first (created by controller)
+        ip=$(oc get svc "${name}-kserve-workload-svc" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+        if [ -n "$ip" ]; then
             echo "$ip"
+            return
         fi
+        # Try stable service (created by this script during validation)
+        ip=$(oc get svc "${name}-predictor-stable" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+        if [ -n "$ip" ]; then
+            echo "$ip"
+            return
+        fi
+        echo -e "${YELLOW}⚠ Warning: Could not get ClusterIP for ${name}${NC}" >&2
+        echo "10.0.0.1"  # fallback
     }
 
     if [ "$SIMULATOR" = true ]; then
@@ -423,6 +471,20 @@ else
     fi
 
     echo ""
+fi
+
+# Ensure MaaS gateway endpoint is set when MaaS routing is enabled (even if validation skipped).
+if [ "$MAAS_ROUTING_ENABLED" = true ] && [ -z "$MAAS_GATEWAY_ENDPOINT" ]; then
+    CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "")
+    if [ -n "$CLUSTER_DOMAIN" ]; then
+        MAAS_GATEWAY_ENDPOINT="maas.${CLUSTER_DOMAIN}:80"
+    fi
+fi
+
+if [ "$MAAS_ROUTING_ENABLED" = true ] && [ -z "$MAAS_GATEWAY_ENDPOINT" ]; then
+    echo -e "${RED}✗ Error: MaaS routing enabled but gateway endpoint is empty.${NC}"
+    echo "  Provide --maas-gateway-endpoint HOST:PORT"
+    exit 1
 fi
 
 # Generate manifests
@@ -501,7 +563,15 @@ else
 fi
 oc apply -f "$TEMP_DIR/deployment.yaml" -n "$NAMESPACE"
 oc apply -f "$TEMP_DIR/service.yaml" -n "$NAMESPACE"
-oc apply -f "$TEMP_DIR/route.yaml" -n "$NAMESPACE"
+
+# Skip route creation if --no-public-route is specified
+# In this mode, semantic-router is only accessible via an upstream gateway
+if [ "$NO_PUBLIC_ROUTE" = true ]; then
+    echo -e "${YELLOW}⚠${NC} Skipping route creation (--no-public-route mode)"
+    echo "  Semantic router will only be accessible via upstream gateway"
+else
+    oc apply -f "$TEMP_DIR/route.yaml" -n "$NAMESPACE"
+fi
 
 echo -e "${GREEN}✓${NC} Resources deployed successfully"
 echo ""
@@ -569,16 +639,44 @@ echo "=================================================="
 echo ""
 echo "Next steps:"
 echo ""
-echo "1. Set the route:"
-echo "   ENVOY_ROUTE=$ROUTE_URL"
-echo ""
-echo "2. Test model auto-routing:"
-echo "   curl -k -X POST https://${ROUTE_URL}/v1/chat/completions \\"
-echo "     -H \"Content-Type: application/json\" \\"
-echo "     -d '{\"model\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"Explain the elements of a contract under common law and give a simple example.\"}]}'"
-echo ""
-echo "3. View logs:"
-echo "   oc logs -l app=semantic-router -c semantic-router -n $NAMESPACE -f"
+
+if [ "$NO_PUBLIC_ROUTE" = true ]; then
+    echo "1. Apply MaaS integration (if not already done):"
+    echo "   cd deploy/openshift/maas-integration && ./apply-maas-integration.sh"
+    echo ""
+    echo "2. Set MAAS host and get token:"
+    echo "   export MAAS_HOST=maas.\$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
+    echo ""
+    echo "   export ACCESS_TOKEN=\$(curl -sSk --oauth2-bearer \"\$(oc whoami -t)\" \\"
+    echo "     --json '{\"expiration\": \"10m\"}' \\"
+    echo "     \"https://\${MAAS_HOST}/maas-api/v1/tokens\" | jq -r .token)"
+    echo ""
+    echo "3. Test with auth (should return 200):"
+    echo "   curl -sSk -X POST \"https://\${MAAS_HOST}/v1/chat/completions\" \\"
+    echo "     -H \"Authorization: Bearer \${ACCESS_TOKEN}\" \\"
+    echo "     -H \"Content-Type: application/json\" \\"
+    echo "     -d '{\"model\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}' | jq ."
+    echo ""
+    echo "4. Test without auth (should return 401):"
+    echo "   curl -sSk -w '\\nHTTP Status: %{http_code}\\n' \\"
+    echo "     -X POST \"https://\${MAAS_HOST}/v1/chat/completions\" \\"
+    echo "     -H \"Content-Type: application/json\" \\"
+    echo "     -d '{\"model\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}'"
+    echo ""
+    echo "5. View logs:"
+    echo "   oc logs -l app=semantic-router -c semantic-router -n $NAMESPACE -f"
+else
+    echo "1. Set the route:"
+    echo "   ENVOY_ROUTE=$ROUTE_URL"
+    echo ""
+    echo "2. Test model auto-routing:"
+    echo "   curl -k -X POST https://${ROUTE_URL}/v1/chat/completions \\"
+    echo "     -H \"Content-Type: application/json\" \\"
+    echo "     -d '{\"model\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'"
+    echo ""
+    echo "3. View logs:"
+    echo "   oc logs -l app=semantic-router -c semantic-router -n $NAMESPACE -f"
+fi
 echo ""
 
 echo ""

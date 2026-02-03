@@ -116,7 +116,7 @@ wait_for_endpoints() {
 }
 
 apply_llmisvc_core() {
-    local llmisvc_url="https://raw.githubusercontent.com/kserve/kserve/master/hack/setup/quick-install/llmisvc-full-install-with-manifests.sh"
+    local llmisvc_url="https://raw.githubusercontent.com/kserve/kserve/${LLMISVC_VERSION}/hack/setup/quick-install/llmisvc-full-install-with-manifests.sh"
     local temp_script temp_core
     temp_script=$(mktemp)
     temp_core=$(mktemp)
@@ -135,8 +135,8 @@ apply_llmisvc_core() {
     fi
 
     local core_start core_end
-    core_start=$(grep -n "KSERVE_CORE_MANIFEST_EOF" "$temp_script" | head -1 | cut -d: -f1)
-    core_end=$(grep -n "KSERVE_CORE_MANIFEST_EOF" "$temp_script" | tail -1 | cut -d: -f1)
+    core_start=$(grep -n "KSERVE_CORE_MANIFEST_EOF" "$temp_script" | head -1 | cut -d: -f1 || true)
+    core_end=$(grep -n "KSERVE_CORE_MANIFEST_EOF" "$temp_script" | tail -1 | cut -d: -f1 || true)
     if [[ -n "$core_start" ]] && [[ -n "$core_end" ]] && [[ "$core_start" -lt "$core_end" ]]; then
         sed -n "$((core_start + 1)),$((core_end - 1))p" "$temp_script" > "$temp_core"
         if [[ -s "$temp_core" ]]; then
@@ -152,7 +152,7 @@ apply_llmisvc_core() {
 }
 
 apply_llmisvc_crds() {
-    local llmisvc_url="https://raw.githubusercontent.com/kserve/kserve/master/hack/setup/quick-install/llmisvc-full-install-with-manifests.sh"
+    local llmisvc_url="https://raw.githubusercontent.com/kserve/kserve/${LLMISVC_VERSION}/hack/setup/quick-install/llmisvc-full-install-with-manifests.sh"
     local temp_script temp_crd_config temp_crd_main
     temp_script=$(mktemp)
     temp_crd_config=$(mktemp)
@@ -166,8 +166,8 @@ apply_llmisvc_crds() {
     fi
 
     local config_start main_start
-    config_start=$(grep -n "name: llminferenceserviceconfigs.serving.kserve.io" "$temp_script" | head -1 | cut -d: -f1)
-    main_start=$(grep -n "name: llminferenceservices.serving.kserve.io" "$temp_script" | head -1 | cut -d: -f1)
+    config_start=$(grep -n "name: llminferenceserviceconfigs.serving.kserve.io" "$temp_script" | head -1 | cut -d: -f1 || true)
+    main_start=$(grep -n "name: llminferenceservices.serving.kserve.io" "$temp_script" | head -1 | cut -d: -f1 || true)
 
     if [[ -n "$config_start" ]] && [[ -n "$main_start" ]]; then
         local config_real_start main_real_start main_end
@@ -203,7 +203,14 @@ apply_llmisvc_full() {
 }
 
 apply_llmisvc_configs() {
-    local local_dir="/home/ubuntu/tmp/kserve/config/llmisvcconfig"
+    # Check if ODH provides templates - if so, skip installation
+    local odh_templates
+    odh_templates=$(oc get llminferenceserviceconfig -n opendatahub -o name 2>/dev/null | wc -l || echo "0")
+    if [[ "$odh_templates" -gt 0 ]]; then
+        log "ODH provides $odh_templates LLMInferenceServiceConfig templates; skipping manual installation."
+        return 0
+    fi
+
     local base_url="https://raw.githubusercontent.com/kserve/kserve/${KSERVE_VERSION}/config/llmisvcconfig"
     local files=(
         "config-llm-decode-template.yaml"
@@ -216,18 +223,62 @@ apply_llmisvc_configs() {
         "config-llm-worker-data-parallel.yaml"
     )
 
-    log "Ensuring LLMInferenceServiceConfig templates..."
-    if [[ -d "$local_dir" ]]; then
-        for f in "${files[@]}"; do
-            if [[ -f "$local_dir/$f" ]]; then
-                oc apply -n kserve -f "$local_dir/$f" 2>/dev/null || warn "Failed to apply $f from local kserve repo"
-            fi
-        done
-    else
-        for f in "${files[@]}"; do
-            oc apply -n kserve -f "${base_url}/${f}" 2>/dev/null || warn "Failed to apply $f from ${base_url}"
-        done
+    log "Installing LLMInferenceServiceConfig templates..."
+    for f in "${files[@]}"; do
+        oc apply -n kserve -f "${base_url}/${f}" 2>/dev/null || warn "Failed to apply $f"
+    done
+}
+
+ensure_llmisvc_template_alias() {
+    # ODH provides versioned templates that work directly; no alias needed
+    local odh_templates
+    odh_templates=$(oc get llminferenceserviceconfig -n opendatahub -o name 2>/dev/null | wc -l || echo "0")
+    if [[ "$odh_templates" -gt 0 ]]; then
+        return 0
     fi
+
+    local target_ns="${1:-kserve}"
+    local template_name="kserve-config-llm-template"
+    local source=""
+    local source_ns=""
+
+    if oc get llminferenceserviceconfig "$template_name" -n "$target_ns" &>/dev/null; then
+        return 0
+    fi
+
+    for ns in kserve opendatahub; do
+        source=$(oc get llminferenceserviceconfig -n "$ns" -o name 2>/dev/null | grep -E "${template_name}$" | head -1 || true)
+        if [[ -n "$source" ]]; then
+            source_ns="$ns"
+            break
+        fi
+    done
+
+    if [[ -z "$source" ]]; then
+        return 0
+    fi
+
+    log "Creating LLMInferenceServiceConfig alias ${template_name} in namespace ${target_ns} (source: ${source_ns})"
+    local json=""
+    json=$(oc get "$source" -n "$source_ns" -o json 2>/dev/null || true)
+    if [[ -z "$json" ]]; then
+        return 0
+    fi
+    printf '%s' "$json" | NS="$target_ns" python3 - <<'PY' | oc apply -n "$target_ns" -f - >/dev/null 2>&1 || true
+import json
+import os
+import sys
+
+obj = json.load(sys.stdin)
+meta = obj.get("metadata", {})
+meta["name"] = "kserve-config-llm-template"
+meta["namespace"] = os.environ.get("NS", "kserve")
+for key in ("resourceVersion", "uid", "creationTimestamp", "generation", "managedFields", "selfLink"):
+    meta.pop(key, None)
+obj["metadata"] = meta
+obj.pop("status", None)
+print(json.dumps(obj))
+PY
 }
 
 ensure_kserve_controllers() {
@@ -411,7 +462,7 @@ if [[ "$INSTALL_LLMISVC" == true ]]; then
         log "Installing LLMInferenceService CRD..."
 
         # Download the kserve quick install script which contains embedded CRDs
-        LLMISVC_INSTALL_URL="https://raw.githubusercontent.com/kserve/kserve/master/hack/setup/quick-install/llmisvc-full-install-with-manifests.sh"
+        LLMISVC_INSTALL_URL="https://raw.githubusercontent.com/kserve/kserve/${LLMISVC_VERSION}/hack/setup/quick-install/llmisvc-full-install-with-manifests.sh"
         TEMP_SCRIPT=$(mktemp)
         TEMP_CRD_CONFIG=$(mktemp)
         TEMP_CRD_MAIN=$(mktemp)
@@ -423,8 +474,8 @@ if [[ "$INSTALL_LLMISVC" == true ]]; then
             # LLMInferenceServices CRD starts at the second 'apiVersion: apiextensions' block
 
             # Find line numbers for the CRD blocks
-            CONFIG_CRD_START=$(grep -n "name: llminferenceserviceconfigs.serving.kserve.io" "$TEMP_SCRIPT" | head -1 | cut -d: -f1)
-            MAIN_CRD_START=$(grep -n "name: llminferenceservices.serving.kserve.io" "$TEMP_SCRIPT" | head -1 | cut -d: -f1)
+            CONFIG_CRD_START=$(grep -n "name: llminferenceserviceconfigs.serving.kserve.io" "$TEMP_SCRIPT" | head -1 | cut -d: -f1 || true)
+            MAIN_CRD_START=$(grep -n "name: llminferenceservices.serving.kserve.io" "$TEMP_SCRIPT" | head -1 | cut -d: -f1 || true)
 
             if [[ -n "$CONFIG_CRD_START" ]] && [[ -n "$MAIN_CRD_START" ]]; then
                 # Extract from 6 lines before the name (to get apiVersion line) to the line before the next CRD
@@ -451,8 +502,8 @@ if [[ "$INSTALL_LLMISVC" == true ]]; then
 
                 # Extract and apply core manifests (controller, webhook service, etc.)
                 TEMP_CORE=$(mktemp)
-                CORE_START=$(grep -n "KSERVE_CORE_MANIFEST_EOF" "$TEMP_SCRIPT" | head -1 | cut -d: -f1)
-                CORE_END=$(grep -n "KSERVE_CORE_MANIFEST_EOF" "$TEMP_SCRIPT" | tail -1 | cut -d: -f1)
+                CORE_START=$(grep -n "KSERVE_CORE_MANIFEST_EOF" "$TEMP_SCRIPT" | head -1 | cut -d: -f1 || true)
+                CORE_END=$(grep -n "KSERVE_CORE_MANIFEST_EOF" "$TEMP_SCRIPT" | tail -1 | cut -d: -f1 || true)
                 if [[ -n "$CORE_START" ]] && [[ -n "$CORE_END" ]] && [[ "$CORE_START" -lt "$CORE_END" ]]; then
                     sed -n "$((CORE_START + 1)),$((CORE_END - 1))p" "$TEMP_SCRIPT" > "$TEMP_CORE"
                     if [[ -s "$TEMP_CORE" ]]; then

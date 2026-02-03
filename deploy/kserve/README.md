@@ -40,7 +40,7 @@ Use the `deploy.sh` script for automated deployment. It handles validation, mode
 ./deploy.sh -n semantic -i granite32-8b -m granite32-8b
 ```
 
-The script validates prerequisites, creates a stable service for your predictor, downloads classification models (~2-3 min), and deploys all resources. Optional flags include `--embedding-model`, `--storage-class`, `--models-pvc-size`, and `--cache-pvc-size`. For manual step-by-step deployment, continue reading below.
+The script validates prerequisites, creates a stable service for your predictor, downloads classification models (~2-3 min), and deploys all resources. Optional flags include `--embedding-model`, `--storage-class`, `--models-pvc-size`, `--cache-pvc-size`, `--no-public-route`, and `--maas-gateway-endpoint`. For manual step-by-step deployment, continue reading below.
 
 ## Manual Deployment
 
@@ -87,7 +87,8 @@ Edit `configmap-router-config.yaml`:
 
 Edit `configmap-envoy-config.yaml`:
 
-1. Update `kserve_dynamic_cluster` address to: `<llminferenceservice>-predictor.<namespace>.svc.cluster.local`
+1. Ensure `kserve_dynamic_cluster` uses ORIGINAL_DST and `x-vsr-destination-endpoint` header (default in this repo).
+2. For MaaS routing, set `maas_routing.enabled: true` and `maas_routing.gateway_endpoint` in `configmap-router-config.yaml`.
 
 ### Step 3: Deploy Resources
 

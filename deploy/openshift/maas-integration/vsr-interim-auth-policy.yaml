@@ -1,0 +1,22 @@
+# AuthPolicy for validating MaaS tokens on the /vsr route
+# This ensures that requests to the semantic router are authenticated
+# using the same token mechanism as direct MaaS model access
+#
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: vsr-interim-auth-policy
+  labels:
+    app: semantic-router
+    integration: maas
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: vsr-interim-route
+  rules:
+    authentication:
+      service-accounts:
+        kubernetesTokenReview:
+          audiences:
+            - maas-default-gateway-sa

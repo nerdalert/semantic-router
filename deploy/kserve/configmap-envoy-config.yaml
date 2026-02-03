@@ -136,24 +136,16 @@ data:
             explicit_http_config:
               http_protocol_options: {}
 
-      # DNS-based cluster for KServe LLMInferenceService (stable ClusterIP)
-      # Uses service DNS name with container port (8000) for HTTP routing
-      # Template variables: {{INFERENCESERVICE_NAME}}, {{NAMESPACE}}
+      # Dynamic cluster using ORIGINAL_DST with header-based destination
+      # The semantic router sets x-vsr-destination-endpoint header (IP:port)
       - name: kserve_dynamic_cluster
         connect_timeout: 300s
         per_connection_buffer_limit_bytes: 52428800
-        type: STRICT_DNS
-        lb_policy: ROUND_ROBIN
-        dns_lookup_family: V4_ONLY
-        load_assignment:
-          cluster_name: kserve_dynamic_cluster
-          endpoints:
-          - lb_endpoints:
-            - endpoint:
-                address:
-                  socket_address:
-                    address: {{INFERENCESERVICE_NAME}}-predictor-stable.{{NAMESPACE}}.svc.cluster.local
-                    port_value: 8000
+        type: ORIGINAL_DST
+        lb_policy: CLUSTER_PROVIDED
+        original_dst_lb_config:
+          use_http_header: true
+          http_header_name: "x-vsr-destination-endpoint"
         typed_extension_protocol_options:
           envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
             "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
